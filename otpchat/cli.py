@@ -1,0 +1,10 @@
+"""Minimal CLI wrapper to run tools (module entry point)."""
+from .tools import main
+
+
+def run():
+    main()
+
+
+if __name__ == "__main__":
+    run()

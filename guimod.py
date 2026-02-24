@@ -80,7 +80,11 @@ class Gui(tk.Frame):
         self.generate_keys()
 
     def select_file_from_box(self, event):
-        self.file = self.availablefiles_listbox.get(tk.ACTIVE).replace(".dict","")
+        sel = self.availablefiles_listbox.get(tk.ACTIVE)
+        if sel.endswith('.dict') or sel.endswith('.store'):
+            self.file = sel.rsplit('.',1)[0]
+        else:
+            self.file = sel
         self.generate_keys()
 
     def update_selected_file(self):
@@ -89,7 +93,7 @@ class Gui(tk.Frame):
 
     def update_available_files(self):
         for file in os.listdir():
-            if file.endswith(".dict") and file not in self.files:
+            if (file.endswith(".dict") or file.endswith('.store')) and file not in self.files:
                 self.files.append(file)
                 self.availablefiles_listbox.insert(tk.END, file)
     

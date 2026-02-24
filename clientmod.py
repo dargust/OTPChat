@@ -1,8 +1,10 @@
+import os
 import socket
 import threading
 
-from otpmod import *
 from guimod import *
+from otpchat.storage import EncryptedStorage
+from otpchat.crypto import OTPManager
 
 class UserInputError(Exception):
     pass
@@ -22,21 +24,45 @@ class Client():
         self.allow_raw_msg = False
 
     def set_otp(self, alphabet, message_length, key_number, file, outqueue):
-        if alphabet == "":
-            alphabet = OTP.defaults_alphabet
+        # Provide sensible defaults
+        default_alphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!@#$%^&*()[]{}<>?,./;:'\"\\| `~"
+        if not alphabet:
+            alphabet = default_alphabet
         if message_length == "":
-            message_length = OTP.defaults_message_length
+            msg_len = 64
         else:
-            message_length = int(message_length)
+            msg_len = int(message_length)
         if key_number == "":
-            key_number = OTP.defaults_key_number
+            num_keys = 0xffff
         else:
-            key_number = int(key_number)
-        if file == "":
-            file = OTP.defaults_file
+            num_keys = int(key_number)
+
+        # Normalize base filename and storage/key paths
+        base = (file or "key").split('.')[0]
+        store_path = base + ".store"
+        key_path = base + ".key"
+
+        # Load or create Fernet key
+        if os.path.exists(key_path):
+            with open(key_path, "rb") as f:
+                fernet_key = f.read()
         else:
-            file += ".dict"
-        self.otp = OTP(alphabet, message_length, key_number, file, outqueue)
+            fernet_key = EncryptedStorage.generate_key()
+            # write the key alongside store; in production, protect this file
+            with open(key_path, "wb") as f:
+                f.write(fernet_key)
+
+        storage = EncryptedStorage(store_path, fernet_key)
+        manager = OTPManager(storage)
+        # If no keys exist, generate them (called from background thread by GUI)
+        if manager.key_count() == 0:
+            if outqueue is not None:
+                outqueue.put("Starting")
+            manager.generate(alphabet, msg_len, num_keys)
+            if outqueue is not None:
+                outqueue.put("Stopped")
+
+        self.otp = manager
     
     def connect(self):
         HOST = self.gui.addr_entry.get()
@@ -167,7 +193,7 @@ class Client():
         prefix = ''
         trailing = []
         if not s:
-            raise IRCBadMessage("Empty line.")
+            raise Exception("Empty line.")
         if s[0] == ':':
             prefix, s = s[1:].split(' ', 1)
         if s.find(' :') != -1:
@@ -199,15 +225,19 @@ class Client():
                             self.create_and_select_frame(other_user, False)
                             self.joined_channels.append(other_user)
                         target_tab = other_user
-                    if len(msg) == self.otp.n + self.otp.get_key_len(self.otp.MAX_KEYS):
-                        try:
-                            int(msg[:self.otp.get_key_len(self.otp.MAX_KEYS)],16)
-                            msg = self.otp.decode(msg)
-                            self.gui.encode_text.config(state=tk.NORMAL)
-                            self.gui.encode_text.insert(tk.END, "{}: {}\n".format(prefix.split('!')[0], msg))
-                            self.gui.encode_text.config(state=tk.DISABLED)
-                        except ValueError:
-                            print("dunno")
+                    # Attempt OTP decode if message looks like an OTP ciphertext
+                    try:
+                        keylen = self.otp._get_key_len_hex()
+                        if len(msg) == self.otp.msg_len + keylen:
+                            int(msg[:keylen], 16)
+                            decoded, ok = self.otp.decode(msg)
+                            if ok:
+                                self.gui.encode_text.config(state=tk.NORMAL)
+                                self.gui.encode_text.insert(tk.END, "{}: {}\n".format(prefix.split('!')[0], decoded))
+                                self.gui.encode_text.config(state=tk.DISABLED)
+                                msg = decoded
+                    except Exception:
+                        pass
                     self.print_tab(target_tab, "{}: {}\n", prefix.split("!")[0], args[1].strip('\r\n'))
                 elif command == "JOIN":
                     target_tab = args[0].strip("\r\n")
