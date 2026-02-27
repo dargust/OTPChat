@@ -41,6 +41,11 @@ class OTPManager:
 
     def key_count(self) -> int:
         return len(self.keys)
+    
+    def has_keys(self) -> bool:
+        if self.keys is None:
+            return False
+        return len(self.keys) > 0
 
     def generate(self, alphabet: str, msg_len: int, num_keys: int) -> None:
         self.alphabet = alphabet

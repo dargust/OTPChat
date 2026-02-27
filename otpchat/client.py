@@ -14,12 +14,20 @@ class OTPChatClient:
         self.key_store_password = key_store_password
         # Initialize other necessary attributes
         if key_store_path and key_store_password:
+            print("Initializing OTPChatClient with key store:", key_store_path)
             self.storage = EncryptedStorage(key_store_path, key_store_password)
             self.otp_manager = OTPManager(self.storage)
+            if self.otp_manager:
+                print(f"Loaded OTP Manager with {self.otp_manager.key_count()} keys available.")
+        elif key_store_path and not key_store_password:
+            print("Failed to open key store: check the store and key path")
+            client_message_queue.put("⌄ ## ERROR ## ⌄\r\nFailed to open key store: check the store and key path\r\n^ ## ERROR ## ^")
+            self.storage = None
+            self.otp_manager = None
         else:
             self.storage = None
             self.otp_manager = None
-        self.encrypt_messages = True
+        self.encrypt_messages = False
 
         self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.connected = False
@@ -123,17 +131,24 @@ class OTPChatClient:
                     self.client_message_queue.put(f"{self.active_channel if self.active_channel else self.system_channel} Unknown command or missing argument: {message}")
                     message = None
             else:
-                if self.encrypt_messages and self.active_channel and self.otp_manager.keys:
-                    encrypted_msg, success = self.otp_manager.encode(message)
-                    if success:
-                        message = f"PRIVMSG {self.active_channel} :{encrypted_msg}\r\n".encode('utf-8')
+                if self.otp_manager and self.encrypt_messages and self.active_channel:
+                    if self.otp_manager.has_keys():
+                        encrypted_msg, success = self.otp_manager.encode(message)
+                        if success:
+                            message = f"PRIVMSG {self.active_channel} :{encrypted_msg}\r\n".encode('utf-8')
+                        else:
+                            print("Failed to encrypt message:", encrypted_msg)
+                            self.client_message_queue.put(f"{self.active_channel} ⌄ ## ERROR ## ⌄\r\nFailed to encrypt message: {message}\r\n^ ## ERROR ## ^")
+                            return(None, False)
+                    elif self.encrypt_messages and not self.otp_manager.has_keys():
+                        print("No OTP keys available, message not sent.")
+                        self.client_message_queue.put(f"{self.active_channel} ⌄ ## ERROR ## ⌄\r\nNo OTP keys available, message not sent.\r\n^ ## ERROR ## ^")
+                        message = None
                     else:
-                        print("Failed to encrypt message:", encrypted_msg)
-                        self.client_message_queue.put(f"{self.active_channel} Failed to encrypt message: {message}\r\n^ ERROR ^")
-                        return(None, False)
-                elif self.encrypt_messages and self.otp_manager.key_count() == 0:
-                    print("No OTP keys available, message not sent.")
-                    self.client_message_queue.put(f"{self.active_channel} No OTP keys available, message not sent.\r\n^ ERROR ^")
+                        message = f"PRIVMSG {self.active_channel} :{message}\r\n".encode('utf-8')
+                elif self.otp_manager == None and self.encrypt_messages:
+                    print("OTP Manager not initialized, cannot encrypt message.")
+                    self.client_message_queue.put(f"{self.active_channel} ⌄ ## ERROR ## ⌄\r\nOTP Manager not initialized, or store could not be loaded, cannot encrypt message.\r\n^ ## ERROR ## ^")
                     message = None
                 else:
                     message = f"PRIVMSG {self.active_channel} :{message}\r\n".encode('utf-8')

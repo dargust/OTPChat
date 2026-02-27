@@ -1,4 +1,5 @@
 from otpchat.client import OTPChatClient
+from otpchat.storage import EncryptedStorage
 import tkinter as tk
 from tkinter import ttk
 from tkinter import filedialog
@@ -16,6 +17,15 @@ class ChannelMessageManager:
         self.channel_messages = {}
     
     def add_message(self, channel: str, message: str):
+        # if the message is an error for a channel, remove the channel prefix for
+        # cleaner display in system_channel and add a note about the channel in the message
+        if channel is system_channel:
+            if message.startswith("#") and "⌄ ## ERROR ## ⌄" in message:
+                # remove the #channel prefix from the message for cleaner display
+                channel_str, message = message.split(" ", 1)
+                message_bulk = message.split("^ ## ERROR ## ^", 1)[0].strip()
+                message = f"{message_bulk}\r\nin channel {channel_str}\r\n^ ## ERROR ## ^"
+                print(f"Processed error message: {message}")
         updated_channels = 0
         if channel not in self.channel_messages:
             self.channel_messages[channel] = []
@@ -25,6 +35,16 @@ class ChannelMessageManager:
         if len(self.channel_messages[channel]) > 100:
             self.channel_messages[channel] = self.channel_messages[channel][-100:]
         return updated_channels
+
+    def remove_channel(self, channel: str):
+        """Remove a channel and its messages. Returns 1 if removed, 0 otherwise."""
+        if channel in self.channel_messages:
+            try:
+                del self.channel_messages[channel]
+            except Exception:
+                return 0
+            return 1
+        return 0
     
     def get_recent_messages(self, channel: str, limit: int = 10):
         return self.channel_messages.get(channel, [])[-limit:]
@@ -46,10 +66,13 @@ class IRCClientGUI:
         self.chat_display = tk.Text(master, state='disabled', width=100, height=25)
         self.chat_display.pack(padx=10, pady=10, expand=True, fill=tk.BOTH)
 
-        self.encrypt_messages = tk.BooleanVar(value=True)
+        self.encrypt_messages = tk.BooleanVar(value=False)
+        # OTP options button (left of encrypt toggle)
+        self.otp_options_button = tk.Button(master, text="OTP Options", command=self._open_otp_options)
+        self.otp_options_button.pack(side=tk.LEFT, padx=(10, 0), pady=(0, 10))
 
         self.encrypt_messages_checkbox = tk.Checkbutton(master, text="Encrypt messages", variable=self.encrypt_messages, command=self.toggle_encrypt)
-        self.encrypt_messages_checkbox.pack(side=tk.LEFT, padx=(10, 0), pady=(0, 10))
+        self.encrypt_messages_checkbox.pack(side=tk.LEFT, padx=(6, 0), pady=(0, 10))
         self.message_entry = tk.Entry(master, width=40)
         self.message_entry.pack(side=tk.LEFT, padx=(10, 0), pady=(0, 10))
         self.message_entry.bind("<Return>", self.send_message)
@@ -64,6 +87,10 @@ class IRCClientGUI:
         # load small config for last-used values
         self.config_path = os.path.abspath("otpchat_config.json")
         self.config = self._load_config()
+
+        # otp-related saved values (used by OTP options panel)
+        self.otp_key_store_var = tk.StringVar(value=self.config.get("key_store", ""))
+        self.otp_key_file_var = tk.StringVar(value=self.config.get("key_file", ""))
 
         self.channel_manager = ChannelMessageManager()
 
@@ -263,6 +290,154 @@ class IRCClientGUI:
         if path:
             var.set(path)
 
+    def _otp_pick_file(self, var: tk.StringVar, save: bool = False):
+        if save:
+            path = filedialog.asksaveasfilename(title="Select file to save", initialdir=os.path.abspath("."))
+        else:
+            path = filedialog.askopenfilename(title="Select file", initialdir=os.path.abspath("."))
+        if path:
+            var.set(path)
+
+    def _open_otp_options(self):
+        overlay = tk.Frame(self.master)
+        overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        dimmer = tk.Canvas(overlay, highlightthickness=0)
+        dimmer.pack(fill="both", expand=True)
+
+        def _resize_dimmer(event):
+            dimmer.delete("dimmer")
+            dimmer.create_rectangle(0, 0, event.width, event.height,
+                                     fill="black", stipple="gray25", tags="dimmer")
+
+        dimmer.bind("<Configure>", _resize_dimmer)
+
+        dialog = tk.Frame(overlay, bd=2, relief=tk.RIDGE)
+        dialog.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
+        dialog.lift()
+        lf = dialog
+        self.otp_frame = overlay
+
+        # local vars (use existing config defaults)
+        ks_default = self.config.get("key_store", "")
+        kf_default = self.config.get("key_file", "")
+
+        ks_var = tk.StringVar(value=ks_default)
+        kf_var = tk.StringVar(value=kf_default)
+
+        row = 0
+        def add_row(label_text, var):
+            nonlocal row
+            lbl = tk.Label(lf, text=label_text)
+            lbl.grid(row=row, column=0, sticky=tk.W, padx=4, pady=2)
+            ent = tk.Entry(lf, textvariable=var, width=40)
+            ent.grid(row=row, column=1, sticky=tk.W, padx=4, pady=2)
+            row += 1
+
+        add_row("OTP key store file:", ks_var)
+        ks_b = tk.Button(lf, text="Browse...", command=lambda: self._otp_pick_file(ks_var))
+        ks_b.grid(row=row-1, column=2, padx=4)
+
+        add_row("OTP store key file:", kf_var)
+        kf_b = tk.Button(lf, text="Browse...", command=lambda: self._otp_pick_file(kf_var))
+        kf_b.grid(row=row-1, column=2, padx=4)
+
+        def _on_apply():
+            ks = ks_var.get().strip() or None
+            kf = kf_var.get().strip() or None
+            # persist
+            if ks:
+                self.config["key_store"] = ks
+            if kf:
+                self.config["key_file"] = kf
+            self._save_config()
+            # if client available, load
+            key_bytes = None
+            if kf:
+                try:
+                    with open(os.path.abspath(kf), "rb") as f:
+                        key_bytes = f.read()
+                except Exception:
+                    key_bytes = None
+            if hasattr(self, 'client') and self.client:
+                try:
+                    self.client.load_new_keys(ks, key_bytes)
+                except Exception:
+                    pass
+            # set login attributes for future connections
+            self.login_key_store = ks
+            self.login_key_file = kf
+            try:
+                self.otp_frame.destroy()
+            except Exception:
+                pass
+        
+        ks_g = tk.Button(lf, text="Generate new store", command=lambda: self._generate_store(ks_var, kf_var))
+        ks_g.grid(row=row, column=0, columnspan=1, pady=(6,2))
+
+        apply_btn = tk.Button(lf, text="Apply", command=_on_apply)
+        apply_btn.grid(row=row, column=0, columnspan=3, pady=(6,2))
+
+        cancel_btn = tk.Button(lf, text="Cancel", command=lambda: (self.otp_frame.destroy()))
+        cancel_btn.grid(row=row, column=2, columnspan=2, pady=(6,2), sticky=tk.E)
+
+    def _generate_key_file(self, kf_var: tk.StringVar):
+        path = kf_var.get().strip()
+        if not path:
+            path = filedialog.asksaveasfilename(title="Save OTP key file", initialdir=os.path.abspath("."))
+            if not path:
+                return
+            kf_var.set(path)
+        try:
+            key = EncryptedStorage.generate_key()
+            with open(os.path.abspath(path), "wb") as f:
+                f.write(key)
+            # notify
+            self.channel_manager.add_message(system_channel, f"OTP: generated key file {os.path.basename(path)}")
+            if self.channel_var.get() == system_channel:
+                self.display_message(f"OTP: generated key file {os.path.basename(path)}")
+        except Exception as e:
+            self.channel_manager.add_message(system_channel, f"OTP: failed to generate key: {e}")
+
+    def _generate_store(self, ks_var: tk.StringVar, kf_var: tk.StringVar):
+        ks_path = ks_var.get().strip()
+        kf_path = kf_var.get().strip()
+        if not ks_path:
+            ks_path = filedialog.asksaveasfilename(title="Save OTP store file", initialdir=os.path.abspath("."))
+            if not ks_path:
+                return
+            ks_var.set(ks_path)
+        # ensure we have a key
+        key_bytes = None
+        if kf_path:
+            try:
+                with open(os.path.abspath(kf_path), "rb") as f:
+                    key_bytes = f.read()
+            except Exception:
+                key_bytes = None
+        if not key_bytes:
+            # generate a new key and save to key file if desired
+            key_bytes = EncryptedStorage.generate_key()
+            if not kf_path:
+                # ask user where to save key
+                kf_path = filedialog.asksaveasfilename(title="Save generated key file", initialdir=os.path.abspath("."))
+                if kf_path:
+                    kf_var.set(kf_path)
+            if kf_path:
+                try:
+                    with open(os.path.abspath(kf_path), "wb") as f:
+                        f.write(key_bytes)
+                except Exception:
+                    pass
+        # create encrypted storage with empty dataset
+        try:
+            storage = EncryptedStorage(os.path.abspath(ks_path), key_bytes)
+            storage.save({})
+            self.channel_manager.add_message(system_channel, f"OTP: created store {os.path.basename(ks_path)}")
+            if self.channel_var.get() == system_channel:
+                self.display_message(f"OTP: created store {os.path.basename(ks_path)}")
+        except Exception as e:
+            self.channel_manager.add_message(system_channel, f"OTP: failed to create store: {e}")
+
     def _on_login(self):
         # store selections and persist last-used user/key store
         server = self.server_var.get().strip()
@@ -310,10 +485,34 @@ class IRCClientGUI:
             if message.startswith("#"):
                 # extract channel from message prefix
                 try:
-                    channel = message.split()[0][1:]
-                    message = message[len(channel)+2:]  # remove channel prefix and space
+                    raw_chan = message.split()[0]
+                    channel = raw_chan[1:]
+                    message = message[len(channel)+2:]
+                    # detect join/part system messages (format: "<user> joined" / "<user> left")
+                    parts = message.split()
+                    if len(parts) >= 2 and parts[-1] in ("joined", "left"):
+                        user = parts[0]
+                        action = parts[-1]
+                        # if the local user left the channel, remove it from our list
+                        if action == "left" and hasattr(self, 'client') and getattr(self.client, 'nickname', None) == user:
+                            removed = self.channel_manager.remove_channel(channel)
+                            if removed:
+                                updated += 1
+                                # also add an entry to SYSTEM to inform user
+                                self.channel_manager.add_message(system_channel, f"#{channel} {message}")
+                                # if it was the selected channel, switch to SYSTEM
+                                if self.channel_var.get() == channel:
+                                    self.channel_var.set(system_channel)
+                                # clear client's active channel so post-update selection prefers SYSTEM
+                                try:
+                                    self.client.active_channel = None
+                                except Exception:
+                                    pass
+                                # skip adding to the removed channel
+                                continue
+                    # normal message: add to channel history and SYSTEM
                     updated += self.channel_manager.add_message(channel, message)
-                    self.channel_manager.add_message(system_channel, f"#{channel} {message}")  # also add to SYSTEM with channel prefix
+                    self.channel_manager.add_message(system_channel, f"#{channel} {message}")
                     # if current selection matches channel, display immediately
                     if self.channel_var.get() == channel:
                         self.display_message(message)
@@ -325,10 +524,11 @@ class IRCClientGUI:
                 if self.channel_var.get() == system_channel:
                     self.display_message(message)
 
-        # if new channels were added, refresh the combo values
+        # if channels changed, refresh the combo values and select system when no active channel
         if updated:
             self._update_channel_list()
-            self.select_channel(self.client.active_channel)
+            preferred = self.client.active_channel if getattr(self, 'client', None) and getattr(self.client, 'active_channel', None) else system_channel
+            self.select_channel(preferred)
         self.master.after(100, self.check_messages)
 
     def display_message(self, message):
