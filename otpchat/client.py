@@ -8,19 +8,21 @@ class OTPChatClient:
 
     EXCLUDE_MSGS = ['001','002','003','004','005','396','251','255','265','266','422','MODE']
 
-    def __init__(self, client_message_queue, key_store_path=None, key_store_password=None):
+    def __init__(self, client_message_queue, key_store_path=None, key_store_password=None, logger=None):
+        import logging
+        self.logger = logger or logging.getLogger(__name__)
         self.client_message_queue = client_message_queue
         self.key_store_path = key_store_path
         self.key_store_password = key_store_password
         # Initialize other necessary attributes
         if key_store_path and key_store_password:
-            print("Initializing OTPChatClient with key store:", key_store_path)
+            self.logger.info("Initializing OTPChatClient with key store: %s", key_store_path)
             self.storage = EncryptedStorage(key_store_path, key_store_password)
             self.otp_manager = OTPManager(self.storage)
             if self.otp_manager:
-                print(f"Loaded OTP Manager with {self.otp_manager.key_count()} keys available.")
+                self.logger.info("Loaded OTP Manager with %d keys available.", self.otp_manager.key_count())
         elif key_store_path and not key_store_password:
-            print("Failed to open key store: check the store and key path")
+            self.logger.error("Failed to open key store: check the store and key path")
             client_message_queue.put("⌄ ## ERROR ## ⌄\r\nFailed to open key store: check the store and key path\r\n^ ## ERROR ## ^")
             self.storage = None
             self.otp_manager = None
@@ -78,14 +80,14 @@ class OTPChatClient:
             self.active_channel = None
             threading.Thread(target=self.receive_message, daemon=True).start()
         except Exception as e:
-            print("Failed to connect to server:", e)
+            self.logger.error("Failed to connect to server: %s", e)
             self.connected = False
 
     def _parse_client_message(self, message):
         # Check if active channel is set and message is not a server message, then encrypt and send to active channel
         success = False
         if self.active_channel == None and message[0] != "/":
-            print("Message does not start with '/', ignoring.")
+            self.logger.warning("Message does not start with '/', ignoring.")
             self.client_message_queue.put("Message does not start with '/', ignoring.")
             message = None
         else:
@@ -114,7 +116,7 @@ class OTPChatClient:
                         if success:
                             message = f"PRIVMSG {target} :{encrypted_msg}\r\n".encode('utf-8')
                         else:
-                            print("Failed to encrypt message:", encrypted_msg)
+                            self.logger.error("Failed to encrypt message: %s", encrypted_msg)
                             message = None
                             self.client_message_queue.put(f"Failed to encrypt message: {msg}")
                 elif command == "list":
@@ -127,7 +129,7 @@ class OTPChatClient:
                 elif command == "motd":
                     message = f"MOTD\r\n".encode('utf-8')
                 else:
-                    print("Unknown command or missing argument.")
+                    self.logger.warning("Unknown command or missing argument.")
                     self.client_message_queue.put(f"{self.active_channel if self.active_channel else self.system_channel} Unknown command or missing argument: {message}")
                     message = None
             else:
@@ -137,17 +139,17 @@ class OTPChatClient:
                         if success:
                             message = f"PRIVMSG {self.active_channel} :{encrypted_msg}\r\n".encode('utf-8')
                         else:
-                            print("Failed to encrypt message:", encrypted_msg)
+                            self.logger.error("Failed to encrypt message: %s", encrypted_msg)
                             self.client_message_queue.put(f"{self.active_channel} ⌄ ## ERROR ## ⌄\r\nFailed to encrypt message: {message}\r\n^ ## ERROR ## ^")
                             return(None, False)
                     elif self.encrypt_messages and not self.otp_manager.has_keys():
-                        print("No OTP keys available, message not sent.")
+                        self.logger.warning("No OTP keys available, message not sent.")
                         self.client_message_queue.put(f"{self.active_channel} ⌄ ## ERROR ## ⌄\r\nNo OTP keys available, message not sent.\r\n^ ## ERROR ## ^")
                         message = None
                     else:
                         message = f"PRIVMSG {self.active_channel} :{message}\r\n".encode('utf-8')
                 elif self.otp_manager == None and self.encrypt_messages:
-                    print("OTP Manager not initialized, cannot encrypt message.")
+                    self.logger.error("OTP Manager not initialized, cannot encrypt message.")
                     self.client_message_queue.put(f"{self.active_channel} ⌄ ## ERROR ## ⌄\r\nOTP Manager not initialized, or store could not be loaded, cannot encrypt message.\r\n^ ## ERROR ## ^")
                     message = None
                 else:
@@ -159,11 +161,11 @@ class OTPChatClient:
         original = message
         message, encrypted = self._parse_client_message(message)
         if message:
-            print(f"Sending message: {message.decode('utf-8').strip()}")
+            self.logger.info("Sending message: %s", message.decode('utf-8').strip())
             try:
                 self.client_socket.send(message)
             except Exception as e:
-                print("Error sending message:", e)
+                self.logger.error("Error sending message: %s", e)
                 return
             if self.client_message_queue:
                 try:
@@ -191,13 +193,13 @@ class OTPChatClient:
 
     def receive_message(self):
         # Implement logic to receive messages from the IRC server and handle them (e.g., update known channels/users, print messages)
-        print("Started message receiving thread.")
+        self.logger.info("Started message receiving thread.")
         buffer = ""
         while self.connected:
             try:
                 data = self.client_socket.recv(1024).decode('utf-8', errors='replace')
                 if not data:
-                    print("Connection closed by server.")
+                    self.logger.info("Connection closed by server.")
                     self.connected = False
                     break
                 buffer += data
@@ -208,11 +210,11 @@ class OTPChatClient:
                         try:
                             prefix, command, args = self._parse_server_message(line)
                         except Exception as parse_exc:
-                            print(f"Failed to parse server message: {line} ({parse_exc})")
+                            self.logger.error("Failed to parse server message: %s (%s)", line, parse_exc)
                             continue
                         # print/queue non-verbose server messages (skip common numeric replies)
                         if command not in self.EXCLUDE_MSGS and command != "PRIVMSG":
-                            print(f"Received message: {line.strip()}")
+                            self.logger.info("Received message: %s", line.strip())
                             if self.client_message_queue:
                                 try:
                                     pass
@@ -249,15 +251,15 @@ class OTPChatClient:
                                 decoded_msg, success = self.otp_manager.decode(args[1])
                                 if success:
                                     display_text = f"{channel} <{sender}!enc> {decoded_msg}"
-                                    print(f"Decrypted message from {sender}: {args[1]} -> {decoded_msg}")
+                                    self.logger.info("Decrypted message from %s: %s -> %s", sender, args[1], decoded_msg)
                                 else:
                                     display_text = f"{channel} <{sender}!enc> (failed to decrypt) {args[1]}"
-                                    print(f"Failed to decrypt message from {sender}: {args[1]}")
+                                    self.logger.error("Failed to decrypt message from %s: %s", sender, args[1])
                             else:
                                 # args[-1] holds the trailing message text
                                 msg_text = args[-1] if args else ''
                                 display_text = f"{channel} <{sender}> {msg_text}"
-                                print(display_text)
+                                self.logger.info("Received message from %s: %s", sender, msg_text)
                             if self.client_message_queue and display_text:
                                 try:
                                     self.client_message_queue.put(display_text)
@@ -266,14 +268,14 @@ class OTPChatClient:
                         elif command == "NOTICE":
                             sender = prefix.split('!')[0]
                             self.known_users.add(sender)
-                            print(f"Notice from {sender}: {' '.join(args)}")
+                            self.logger.info("Notice from %s: %s", sender, ' '.join(args))
                             if self.client_message_queue:
                                 try:
                                     self.client_message_queue.put(f"NOTICE from {sender}: {' '.join(args)}")
                                 except Exception:
                                     pass
                         elif command == "372":  # MOTD
-                            print(f"MOTD: {' '.join(args)}")
+                            self.logger.info("MOTD: %s", ' '.join(args))
                             if self.client_message_queue:
                                 try:
                                     if len(args[1].strip()) > 0:
@@ -289,7 +291,7 @@ class OTPChatClient:
                                 except Exception:
                                     pass
                         elif command == "401":  # No such nick/channel
-                            print(f"Error: {' '.join(args)}")
+                            self.logger.error("Error: %s", ' '.join(args))
                             if self.client_message_queue:
                                 try:
                                     self.client_message_queue.put(f"ERROR: {' '.join(args)}")
@@ -310,12 +312,12 @@ class OTPChatClient:
                                     except Exception:
                                         pass
                             except Exception as e:
-                                print("Failed to change nickname:", e)
+                                self.logger.error("Failed to change nickname: %s", e)
                                 if self.client_message_queue:
                                     try:
                                         self.client_message_queue.put(f"Failed to change nick: {e}")
                                     except Exception:
                                         pass
             except Exception as e:
-                print("Error receiving message:", e)
+                self.logger.error("Error receiving message: %s", e)
                 self.connected = False
